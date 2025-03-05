@@ -1,0 +1,263 @@
+---
+title: "Assigning ASV's with DADA2"
+author: "Daphne Garcia"
+date: "2025-03-05"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+ 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Goals
+1. Infer the errors in our sequences, separately on forward and reverse reads
+2. Assign ASVs on both forward and reverse reads separately. Apply the error model
+3. Merge forward and reverse reads into "contiguous ASVs"
+4. Generate first draft of ASV count table
+5. Quality trimming of ASV lengths (run stats, make sure we have asv lengths that make sense for the things we ran on our dataset)
+6. Remove chimeras 
+7. Take sequences of ASVs we have now, and assign taxonomy with Silva Database
+8. Write out relevant files: `asv_table`, `asvs_fasta`, `tax_table`, and `sample_data`
+
+
+## Input
+
+1. Filtered fastq files generated from `01_qualityTrimming.rmd`
+2. Sample Name vector
+
+## Output
+
+1. `asv_table`
+2. `asvs_fasta`
+3. `tax_table`
+4. `sample_data`
+
+#Set up environment:
+
+##Set seed
+```{r set seed}
+
+set.seed(238428)
+```
+
+## Load packages
+```{r}
+
+pacman::p_load(tidyverse, dada2, DT, devtools, patchwork, install = FALSE)
+
+```
+
+
+# Load Filtered Fastq Files
+```{r load-packages}
+
+#place filtered seq files into a variable
+filtered_fastqs_path <- "data/01_DADA2/02_filtered_fastqs"
+
+filtered_fastqs_path
+
+#create forward vector
+filtered_forward_reads <- 
+  list.files(filtered_fastqs_path, pattern = "R1_filtered.fastq.gz",
+             full.names = TRUE)
+
+#create reverse vector
+filtered_reverse_reads <- 
+  list.files(filtered_fastqs_path, pattern = "R2_filtered.fastq.gz",
+             full.names = TRUE)
+
+#check
+filtered_forward_reads[1:5]
+filtered_reverse_reads[1:5]
+```
+
+#Sample names
+```{r sample names}
+
+# Create vector of sample names from the filenames 
+sample_names <- sapply(strsplit(basename(filtered_forward_reads), "_"), `[`,1) 
+
+# Intuition Check 
+head(sample_names)
+```
+
+#Error Modelling
+```{r error modelling}
+#Forward reads
+error_forward_reads <-
+  learnErrors(filtered_forward_reads, multithread = 6)
+
+#Forward plot
+forward_error_plot <- 
+  plotErrors(error_forward_reads, nominalQ = TRUE) +
+  labs(title = "Forward Reads: Error Model")
+
+#Reverse reads
+error_reverse_reads <-
+  learnErrors(filtered_reverse_reads, multithread = 6)
+
+#Reverse plot
+reverse_error_plot <- 
+  plotErrors(error_reverse_reads, nominalQ = TRUE) +
+  labs(title = "Reverse Reads: Error Model")
+
+# Look at plots together
+forward_error_plot + reverse_error_plot
+
+```
+
+
+# Infer ASVs
+```{r infer ASVs}
+
+#Forward ASVs
+dada_forward <- dada(filtered_forward_reads,
+                     err = error_forward_reads,
+                     multithread = 6)
+
+#take a look at the data
+typeof(dada_forward)
+dada_forward$WaterControl_R1_filtered.fastq.gz
+
+#Reverse ASVs
+
+dada_reverse <- dada(filtered_reverse_reads,
+                     err = error_reverse_reads,
+                     multithread = 6)
+
+#take a look at the data
+typeof(dada_reverse)
+dada_reverse$WaterControl_R2_filtered.fastq.gz
+
+```
+
+
+# Merge Forward and Reverse ASVs
+```{r merge fwd rvs ASVs}
+
+merged_ASVs <- 
+  mergePairs(dada_forward, filtered_forward_reads,
+             dada_reverse, filtered_reverse_reads,
+             verbose = TRUE)
+
+#Evaluate the data output
+typeof(merged_ASVs)
+length(merged_ASVs)
+names(merged_ASVs)
+
+#Inspect further
+head(merged_ASVs[1])
+```
+
+
+# Create Raw ASV count table
+```{r raw ASV count table}
+
+raw_ASV_table <- makeSequenceTable(merged_ASVs)
+
+# write out raw asv_table
+write.table(raw_ASV_table, file = "data/01_DADA2_raw_ASV_counts.tsv",
+              sep = "\t", quote = FALSE, col.names = NA)
+
+# Check the type and dimensions of the data
+dim(raw_ASV_table)
+
+```
+
+
+#Assess ASV qualitiy
+```{r assessing ASV quality}
+maxLength_ASV <- max(nchar(getSequences(raw_ASV_table))) # Longest ASV?
+minLength_ASV <- min(nchar(getSequences(raw_ASV_table))) # Shortest ASV?
+meanLength_ASV <- mean(nchar(getSequences(raw_ASV_table))) # Mean ASV length?
+medianLength_ASV <- median(nchar(getSequences(raw_ASV_table))) # Median ASV length?
+
+# Create a table to Inspect the distribution of sequence lengths of all ASVs in dataset 
+table(nchar(getSequences(raw_ASV_table)))
+```
+
+#ASV length plot
+
+```{r}
+# Inspect the distribution of sequence lengths of all ASVs in data set 
+# AFTER TRIM
+data.frame(Seq_Length = nchar(getSequences(raw_ASV_table))) %>%
+  ggplot(aes(x = Seq_Length )) + 
+  geom_histogram() + 
+  # include the x-axis scales
+  scale_x_continuous(limits = c(0, maxLength_ASV + 5)) + 
+  labs(title = "Raw distribution of ASV length",
+       y = "Number of ASVs", x = "ASV Sequence Length (bps)")
+
+
+getSequences(raw_ASV_table)
+
+ 
+data.frame(nchar(getSequences(raw_ASV_table))) %>%
+  head()
+
+
+
+
+data.frame(Seq_Length = nchar(getSequences(raw_ASV_table))) %>%
+  ggplot(aes(x = Seq_Length )) + 
+  geom_histogram() + 
+  scale_x_continuous(limits = c(0,450))
+  scale_x_continuous(limits = c(0, maxLength_ASV + 5)) + 
+  labs(title = "Raw ASV lengths",
+       y = "Number of ASVs", x = "ASV Sequence Length (bps)")
+
+```
+issues: we might have dna sequences called chimeras
+
+#Trim ASVs
+```{r trim ASVs}
+#lets trim to 245
+# Only pull ASVs that have a length of 245 bps
+raw_ASV_table_trimmed <- 
+  raw_ASV_table[,nchar(getSequences(raw_ASV_table)) == 245]
+
+# Intuition check: Inspect the distribution of sequence lengths of all ASVs in dataset 
+table(nchar(getSequences(raw_ASV_table_trimmed)))
+
+
+```
+
+# Remove Chimeras
+what are chimeras? frankenstein sequences made from parts of true sequences in our data.
+they are natural processes of libary prep and illumina 2 step, so it's common to find them. However, this is a fake sequence, and must be removed
+```{r remove chimeras}
+
+# Remove the chimeras in the raw ASV table
+noChimeras_ASV_table <- 
+  removeBimeraDenovo(raw_ASV_table_trimmed, 
+                     method="consensus", 
+                     multithread = 6, 
+                     verbose = TRUE)
+    # Identified 241 bimeras out of 3160 input sequences.
+
+# Structure of the data?
+dim(noChimeras_ASV_table)
+    # 96 of 2191 (and if we subtract 3160 - 241, it's 2919)
+
+#intuition check
+length(raw_ASV_table_trimmed)
+
+
+```
+
+
+
+
+
+# Session Information
+
+```{r session info}
+#Ensure reproducibility with package version information
+
+devtools::session_info()
+
+```
+
